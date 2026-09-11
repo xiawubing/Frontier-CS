@@ -1,6 +1,14 @@
 // checker.cpp
-// C++11 testlib special judge for the Slitherlink-like problem.
-// Fully reproduces behavior of the original Python+Z3 checker.
+// C++ testlib special judge for the Slitherlink-like problem (Number Loop Construction).
+// Reproduces the behaviour (parsing, scoring, verdict text) of the original checker, but counts the
+// solutions with an algorithm that always finishes well inside the judge's 10 s checker CPU limit:
+//   1. a brute-force DFS over the edges with a fixed node budget (every loop it finds is a genuine solution,
+//      so reaching the 6-solution cap or exhausting the search is an exact answer), then, only if the
+//      budget ran out,
+//   2. a plug DP (broken-profile DP with bracket-encoded connectivity) that counts all single closed loops
+//      consistent with the clues.
+// The original enumeration (full assignment of all 312 edges + O(E) propagation scans) needed far more than
+// 10 s CPU on loosely constrained outputs (no '0' clues); the judge then killed it and scored the output 0.
 // Requires testlib.h in include path.
 
 #include "testlib.h"
@@ -93,490 +101,224 @@ vector<string> readSol(InStream &in){
     return res;
 }
 
-// Edge representation
-struct Edge {
-    bool is_h; // horizontal if true, vertical if false
-    int i, j;  // coordinates: H[i][j] or V[i][j]
-    vector<pair<int,int>> adj_cells;  // adjacent cells (r,c)
-    vector<pair<int,int>> adj_points; // endpoints (pi,pj)
-    int score; // heuristic: number of adjacent numbered cells
+
+// ===================== solution counting: brute-force DFS with node budget =====================
+// Brute-force DFS (12x12, edge order, path-endpoint tracking)
+// with a deterministic node budget.  Finds genuine loops; if it reaches `limit` the answer ">= limit" is exact;
+// if it finishes without abort the count is exact; if aborted, the caller must fall back to the DP.
+namespace dfs12 {
+const int N = 12;
+static std::string grid[N];
+static int H[N+1][N], V[N][N+1];
+static int cellSel[N][N], cellUn[N][N];
+static int degv[N+1][N+1], unv[N+1][N+1];
+static int mate[(N+1)*(N+1)], plen[(N+1)*(N+1)];
+static int totalSel; static bool closed; static int cyclelen;
+static long long found; static int LIMIT;
+static long long nodes, budget; static bool aborted;
+struct E { bool h; int i, j; };
+static std::vector<E> order_;
+static inline int vid(int i, int j){ return i*(N+1)+j; }
+static bool cellOK(int r, int c){ if(r<0||r>=N||c<0||c>=N) return true; if(grid[r][c]==' ') return true; int d=grid[r][c]-'0'; if(cellSel[r][c]>d) return false; if(cellSel[r][c]+cellUn[r][c]<d) return false; return true; }
+static bool vertOK(int i, int j){ if(degv[i][j]>2) return false; if(unv[i][j]==0 && degv[i][j]!=0 && degv[i][j]!=2) return false; if(degv[i][j]==1 && unv[i][j]==0) return false; return true; }
+static bool allCluesSat(){ for(int r=0;r<N;r++)for(int c=0;c<N;c++) if(grid[r][c]!=' '){ if(cellSel[r][c]!=grid[r][c]-'0') return false; } return true; }
+static void dfs(int idx){
+    if(aborted) return;
+    if(++nodes > budget){ aborted = true; return; }
+    if(found>=LIMIT) return;
+    if(idx==(int)order_.size()){ if(closed && allCluesSat()){ found++; } return; }
+    E e=order_[idx]; int lo=0, hi=1; if(closed) hi=0;
+    for(int val=lo; val<=hi; val++){
+        int sTot=totalSel; bool sClosed=closed; int sCyc=cyclelen;
+        int u,v,r1,c1,r2,c2;
+        if(e.h){ u=vid(e.i,e.j); v=vid(e.i,e.j+1); r1=e.i-1;c1=e.j; r2=e.i;c2=e.j; H[e.i][e.j]=val; }
+        else   { u=vid(e.i,e.j); v=vid(e.i+1,e.j); r1=e.i;c1=e.j-1; r2=e.i;c2=e.j; V[e.i][e.j]=val; }
+        int ui=u/(N+1), uj=u%(N+1), vi=v/(N+1), vj=v%(N+1);
+        bool ok=true; int cells[2][2]={{r1,c1},{r2,c2}};
+        for(int k=0;k<2;k++){int r=cells[k][0],c=cells[k][1]; if(r<0||r>=N||c<0||c>=N)continue; cellUn[r][c]--; if(val)cellSel[r][c]++;}
+        unv[ui][uj]--; unv[vi][vj]--; if(val){degv[ui][uj]++;degv[vi][vj]++;}
+        int savedMateA=-1,savedMateB=-1,ma=-1,mb=-1,savedPlenA=0,savedPlenB=0;
+        if(val){ totalSel++;
+            if(degv[ui][uj]>2||degv[vi][vj]>2) ok=false;
+            else{ ma=mate[u]; mb=mate[v];
+                if(ma==v){ int len=plen[u]+1; if(closed) ok=false; else { closed=true; cyclelen=len; if(cyclelen!=totalSel) ok=false; } }
+                else { savedMateA=mate[ma]; savedMateB=mate[mb]; savedPlenA=plen[ma]; savedPlenB=plen[mb]; int len=plen[u]+plen[v]+1; mate[ma]=mb; mate[mb]=ma; plen[ma]=len; plen[mb]=len; } } }
+        if(ok){ for(int k=0;k<2&&ok;k++){int r=cells[k][0],c=cells[k][1]; if(!cellOK(r,c))ok=false;} if(ok&&!vertOK(ui,uj))ok=false; if(ok&&!vertOK(vi,vj))ok=false; }
+        if(ok) dfs(idx+1);
+        if(val){ if(ma!=-1){ if(ma==v){} else { mate[ma]=savedMateA; mate[mb]=savedMateB; plen[ma]=savedPlenA; plen[mb]=savedPlenB; } } degv[ui][uj]--; degv[vi][vj]--; }
+        unv[ui][uj]++; unv[vi][vj]++;
+        for(int k=0;k<2;k++){int r=cells[k][0],c=cells[k][1]; if(r<0||r>=N||c<0||c>=N)continue; cellUn[r][c]++; if(val)cellSel[r][c]--;}
+        totalSel=sTot; closed=sClosed; cyclelen=sCyc;
+        if(e.h) H[e.i][e.j]=-1; else V[e.i][e.j]=-1;
+        if(found>=LIMIT || aborted) return;
+    }
+}
+// returns found (== limit means ">= limit"); sets aborted_ if the node budget ran out (count then unusable)
+inline long long count_capped(const std::vector<std::string>& g, int limit, long long budget_, bool& aborted_, long long* nodes_used = nullptr){
+    for(int i=0;i<N;i++){ std::string l = i < (int)g.size() ? g[i] : ""; while((int)l.size()<N) l.push_back(' '); grid[i]=l.substr(0,N); }
+    LIMIT=limit; budget=budget_; nodes=0; aborted=false; found=0; totalSel=0; closed=false; cyclelen=0;
+    memset(H,-1,sizeof(H)); memset(V,-1,sizeof(V));
+    for(int r=0;r<N;r++)for(int c=0;c<N;c++){cellSel[r][c]=0;cellUn[r][c]=4;}
+    for(int i=0;i<=N;i++)for(int j=0;j<=N;j++){ degv[i][j]=0; int t=0; if(i)t++; if(i<N)t++; if(j)t++; if(j<N)t++; unv[i][j]=t; mate[vid(i,j)]=vid(i,j); plen[vid(i,j)]=0; }
+    order_.clear();
+    for(int r=0;r<N;r++){ for(int c=0;c<N;c++){ order_.push_back({true,r,c}); order_.push_back({false,r,c}); } order_.push_back({false,r,N}); }
+    for(int c=0;c<N;c++) order_.push_back({true,N,c});
+    dfs(0);
+    aborted_ = aborted; if(nodes_used) *nodes_used = nodes;
+    return found;
+}
+} // namespace dfs12
+
+// ===================== solution counting: plug DP (bracket representation) =====================
+// Plug DP (bracket representation) that counts single closed loops
+// on the (NR+1)x(NC+1) vertex grid whose per-cell edge counts match every clue.
+// grid[r][c]: ' ' = no clue, '0'..'3' = clue.  Count saturates at CAP.
+
+namespace slither {
+
+typedef unsigned long long u64;
+const u64 CAP = 1000000000000000000ULL; // 1e18
+
+inline u64 satadd(u64 a, u64 b){ u64 s = a + b; return s > CAP ? CAP : s; }
+
+struct HashTable {
+    std::vector<u64> key, val; std::vector<int> nxt;
+    std::vector<int> head; std::vector<int> used; int mask;
+    explicit HashTable(int bits = 20): head(1 << bits, -1), mask((1 << bits) - 1) {}
+    void clear(){ for(int h : used) head[h] = -1; used.clear(); key.clear(); val.clear(); nxt.clear(); }
+    static inline u64 mix(u64 x){ x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33; return x; }
+    void add(u64 k, u64 v){
+        int h = (int)(mix(k) & mask);
+        for(int e = head[h]; e != -1; e = nxt[e]) if(key[e] == k){ val[e] = satadd(val[e], v); return; }
+        if(head[h] == -1) used.push_back(h);
+        key.push_back(k); val.push_back(v); nxt.push_back(head[h]); head[h] = (int)key.size() - 1;
+    }
+    size_t size() const { return key.size(); }
 };
 
-vector<Edge> edges;
-int Ecnt;
+// Frontier at vertex (i,j): positions 0..j-1 = down plugs of columns 0..j-1 (edges row i -> i+1),
+// position j = horizontal plug (edge (i,j-1)->(i,j)), positions j+1..NC+1 = up plugs of columns j..NC
+// (edges row i-1 -> i).  Plug value: 0 none, 1 '(', 2 ')'.
+// H-bit c = H[i-1][c] (top edge of the cell above the frontier), kept only for clue cells.
+inline u64 count_loops(const std::vector<std::string>& grid, int NR, int NC, size_t* maxStates = nullptr){
+    const int P   = NC + 2;      // plug positions
+    const int HB0 = 2 * P;       // first h-bit
+    const int CL  = HB0 + NC;    // closed-flag bit
+    if(CL >= 64) quitf(_fail, "checker internal error: grid too wide for 64-bit DP state");
+    auto clue = [&](int r, int c)->int { if(r < 0 || r >= NR || c < 0 || c >= NC) return -1; char ch = grid[r][c]; return ch == ' ' ? -1 : ch - '0'; };
+    auto getp = [&](u64 s, int p)->int { return (int)((s >> (2 * p)) & 3ULL); };
+    auto setp = [&](u64 s, int p, int v)->u64 { return (s & ~(3ULL << (2 * p))) | ((u64)v << (2 * p)); };
+    auto geth = [&](u64 s, int c)->int { return (int)((s >> (HB0 + c)) & 1ULL); };
+    auto seth = [&](u64 s, int c, int v)->u64 { return (s & ~(1ULL << (HB0 + c))) | ((u64)v << (HB0 + c)); };
+    const u64 CLOSED = 1ULL << CL;
+    const u64 PLUGMASK = (1ULL << (2 * P)) - 1;
 
-// Backtracking state
-vector<int> edge_val; // -1 unassigned, 0 false, 1 true
-int cell_assigned_true[N][N];
-int cell_unassigned[N][N];
-int point_deg[N+1][N+1];
-int point_unassigned[N+1][N+1];
-
-struct Change {
-    int type; // 0: edge val, 1: cell_assigned_true, 2: cell_unassigned, 3: point_deg, 4: point_unassigned
-    int a;    // encoded index (edge idx or r*100 + c or pi*100 + pj)
-    int old;
-};
-vector<Change> changes;
-
-void apply_assign(int eidx, int val){
-    // assume edge_val[eidx] == -1
-    changes.push_back({0, eidx, edge_val[eidx]});
-    edge_val[eidx] = val;
-    const Edge &ed = edges[eidx];
-    // adjacent cells
-    for(size_t k=0;k<ed.adj_cells.size();++k){
-        int r = ed.adj_cells[k].first;
-        int c = ed.adj_cells[k].second;
-        changes.push_back({2, r*100 + c, cell_unassigned[r][c]});
-        cell_unassigned[r][c]--;
-        if(val == 1){
-            changes.push_back({1, r*100 + c, cell_assigned_true[r][c]});
-            cell_assigned_true[r][c]++;
-        }
-    }
-    // endpoints
-    for(size_t k=0;k<ed.adj_points.size();++k){
-        int pi = ed.adj_points[k].first;
-        int pj = ed.adj_points[k].second;
-        changes.push_back({4, pi*100 + pj, point_unassigned[pi][pj]});
-        point_unassigned[pi][pj]--;
-        if(val == 1){
-            changes.push_back({3, pi*100 + pj, point_deg[pi][pj]});
-            point_deg[pi][pj]++;
-        }
-    }
-}
-
-void rollback_to(int sz){
-    while((int)changes.size() > sz){
-        Change ch = changes.back(); changes.pop_back();
-        if(ch.type == 0){
-            edge_val[ch.a] = ch.old;
-        } else if(ch.type == 1){
-            int r = ch.a / 100, c = ch.a % 100;
-            cell_assigned_true[r][c] = ch.old;
-        } else if(ch.type == 2){
-            int r = ch.a / 100, c = ch.a % 100;
-            cell_unassigned[r][c] = ch.old;
-        } else if(ch.type == 3){
-            int pi = ch.a / 100, pj = ch.a % 100;
-            point_deg[pi][pj] = ch.old;
-        } else if(ch.type == 4){
-            int pi = ch.a / 100, pj = ch.a % 100;
-            point_unassigned[pi][pj] = ch.old;
-        }
-    }
-}
-
-// Propagation: enforce cell counts and point degree constraints (0 or 2)
-bool contradiction_check_and_propagate(){
-    bool changed = true;
-    int iter = 0;
-    while(changed){
-        changed = false;
-        iter++;
-        if(iter > 300000) break; // safety
-        // cells
-        for(int r=0;r<N;r++){
-            for(int c=0;c<N;c++){
-                char ch = grid[r][c];
-                if(ch == ' ') continue;
-                int need = ch - '0';
-                int have = cell_assigned_true[r][c];
-                int rem = cell_unassigned[r][c];
-                if(have > need) return false;
-                if(have + rem < need) return false;
-                if(rem == 0){
-                    if(have != need) return false;
+    HashTable *cur = new HashTable(20), *nxt = new HashTable(20);
+    cur->add(0, 1);
+    size_t mx = 0;
+    for(int i = 0; i <= NR; i++){
+        for(int j = 0; j <= NC; j++){
+            nxt->clear();
+            const bool canD = (i < NR), canR = (j < NC);
+            const int clueAbove = (i >= 1 && j <= NC - 1) ? clue(i - 1, j) : -1;   // cell (i-1,j): closes now
+            const int clueLeft  = (i <= NR - 1 && j >= 1) ? clue(i, j - 1) : -1;   // cell (i,j-1): partial
+            const int clueHere  = (i <= NR - 1 && j <= NC - 1) ? clue(i, j) : -1;  // cell (i,j): partial
+            for(size_t e = 0; e < cur->key.size(); e++){
+                const u64 s = cur->key[e]; const u64 cnt = cur->val[e];
+                const int L = getp(s, j), U = getp(s, j + 1);
+                const bool closed = (s & CLOSED) != 0;
+                const int upRight  = (j + 2 <= P - 1) ? getp(s, j + 2) : 0;  // up plug of column j+1 = V[i-1][j+1]
+                const int leftDown = (j >= 1) ? getp(s, j - 1) : 0;          // down plug of column j-1 = V[i][j-1]
+                const int topAbove = (j <= NC - 1) ? geth(s, j) : 0;         // H[i-1][j]
+                auto emit = [&](int D, int R, u64 base, bool setClosed){
+                    if(clueAbove >= 0){
+                        int c = topAbove + (U ? 1 : 0) + (upRight ? 1 : 0) + (R ? 1 : 0);
+                        if(c != clueAbove) return;
+                    }
+                    if(clueLeft >= 0){
+                        int c = (L ? 1 : 0) + (leftDown ? 1 : 0) + (D ? 1 : 0);
+                        if(c > clueLeft || c + 1 < clueLeft) return;
+                    }
+                    if(clueHere >= 0){
+                        int c = (R ? 1 : 0) + (D ? 1 : 0);
+                        if(c > clueHere || c + 2 < clueHere) return;
+                    }
+                    u64 t = setp(setp(base, j, D), j + 1, R);
+                    if(j <= NC - 1) t = seth(t, j, (clueHere >= 0 && R) ? 1 : 0);
+                    if(setClosed) t |= CLOSED;
+                    if(j == NC){ // row shift: new p[0]=0, new p[k+1]=old p[k]; old p[NC+1] (=R=0) dropped
+                        u64 plugs = ((t & PLUGMASK) << 2) & PLUGMASK;
+                        t = (t & ~PLUGMASK) | plugs;
+                    }
+                    nxt->add(t, cnt);
+                };
+                if(closed){ if(L || U) continue; emit(0, 0, s, false); continue; }
+                if(L == 0 && U == 0){
+                    emit(0, 0, s, false);
+                    if(canD && canR) emit(1, 2, s, false);          // new path: D='(' , R=')'
+                } else if(L != 0 && U == 0){
+                    if(canD) emit(L, 0, s, false);
+                    if(canR) emit(0, L, s, false);
+                } else if(L == 0 && U != 0){
+                    if(canD) emit(U, 0, s, false);
+                    if(canR) emit(0, U, s, false);
                 } else {
-                    if(have == need){
-                        // force remaining adjacent edges false
-                        for(int e=0;e<Ecnt;e++){
-                            if(edge_val[e] != -1) continue;
-                            for(size_t k=0;k<edges[e].adj_cells.size();++k){
-                                if(edges[e].adj_cells[k].first==r && edges[e].adj_cells[k].second==c){
-                                    apply_assign(e, 0);
-                                    changed = true;
-                                    break;
-                                }
-                            }
-                        }
-                    } else if(have + rem == need){
-                        // force remaining adjacent edges true
-                        for(int e=0;e<Ecnt;e++){
-                            if(edge_val[e] != -1) continue;
-                            for(size_t k=0;k<edges[e].adj_cells.size();++k){
-                                if(edges[e].adj_cells[k].first==r && edges[e].adj_cells[k].second==c){
-                                    apply_assign(e, 1);
-                                    changed = true;
-                                    break;
-                                }
-                            }
-                        }
+                    if(L == 1 && U == 2){                             // matched pair -> loop closes
+                        u64 others = (s & PLUGMASK) & ~(3ULL << (2 * j)) & ~(3ULL << (2 * (j + 1)));
+                        if(others != 0) continue;                     // would leave other paths -> >1 loop
+                        emit(0, 0, s, true);
+                    } else if(L == 1 && U == 1){                      // relabel U's match ')' -> '('
+                        int depth = 1, q = -1;
+                        for(int p = j + 2; p < P; p++){ int v = getp(s, p); if(v == 1) depth++; else if(v == 2 && --depth == 0){ q = p; break; } }
+                        if(q < 0) quitf(_fail, "checker internal error: bracket mismatch in plug DP");
+                        emit(0, 0, setp(s, q, 1), false);
+                    } else if(L == 2 && U == 2){                      // relabel L's match '(' -> ')'
+                        int depth = 1, q = -1;
+                        for(int p = j - 1; p >= 0; p--){ int v = getp(s, p); if(v == 2) depth++; else if(v == 1 && --depth == 0){ q = p; break; } }
+                        if(q < 0) quitf(_fail, "checker internal error: bracket mismatch in plug DP");
+                        emit(0, 0, setp(s, q, 2), false);
+                    } else {                                          // L=')', U='(' : endpoints already right
+                        emit(0, 0, s, false);
                     }
                 }
             }
-        }
-        // points: degree must be 0 or 2
-        for(int pi=0; pi<=N; ++pi){
-            for(int pj=0; pj<=N; ++pj){
-                int deg = point_deg[pi][pj];
-                int rem = point_unassigned[pi][pj];
-                bool possible0 = (deg <= 0 && 0 <= deg + rem);
-                bool possible2 = (deg <= 2 && 2 <= deg + rem);
-                if(!possible0 && !possible2) return false;
-                if(rem == 0){
-                    if(!(deg == 0 || deg == 2)) return false;
-                } else {
-                    if(possible0 && !possible2){
-                        // only 0 possible -> all remaining edges adjacent must be false
-                        for(int e=0;e<Ecnt;e++){
-                            if(edge_val[e] != -1) continue;
-                            for(size_t k=0;k<edges[e].adj_points.size();++k){
-                                if(edges[e].adj_points[k].first==pi && edges[e].adj_points[k].second==pj){
-                                    apply_assign(e, 0);
-                                    changed = true;
-                                    break;
-                                }
-                            }
-                        }
-                    } else if(!possible0 && possible2){
-                        int need_true = 2 - deg;
-                        if(need_true < 0) return false;
-                        if(need_true == 0){
-                            for(int e=0;e<Ecnt;e++){
-                                if(edge_val[e] != -1) continue;
-                                for(size_t k=0;k<edges[e].adj_points.size();++k){
-                                    if(edges[e].adj_points[k].first==pi && edges[e].adj_points[k].second==pj){
-                                        apply_assign(e, 0);
-                                        changed = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        } else if(need_true == rem){
-                            for(int e=0;e<Ecnt;e++){
-                                if(edge_val[e] != -1) continue;
-                                for(size_t k=0;k<edges[e].adj_points.size();++k){
-                                    if(edges[e].adj_points[k].first==pi && edges[e].adj_points[k].second==pj){
-                                        apply_assign(e, 1);
-                                        changed = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            std::swap(cur, nxt);
+            mx = std::max(mx, cur->size());
         }
     }
-    return true;
+    u64 total = 0;
+    for(size_t e = 0; e < cur->key.size(); e++) if(cur->key[e] & CLOSED) total = satadd(total, cur->val[e]);
+    if(maxStates) *maxStates = mx;
+    delete cur; delete nxt;
+    return total;
 }
 
-// branching heuristic: prefer edges adjacent to numbered cells
-int pick_next_edge(){
-    int best = -1;
-    int best_score = -1;
-    for(int e=0;e<Ecnt;e++){
-        if(edge_val[e] != -1) continue;
-        if(edges[e].score > best_score){
-            best_score = edges[e].score;
-            best = e;
-        }
-    }
-    if(best != -1) return best;
-    for(int e=0;e<Ecnt;e++) if(edge_val[e] == -1) return e;
-    return -1;
-}
-
-// build H/V matrices from edge_val
-void build_hv_from_edges(vector<vector<int>> &H, vector<vector<int>> &V){
-    H.assign(N+1, vector<int>(N,0));
-    V.assign(N, vector<int>(N+1,0));
-    for(int e=0;e<Ecnt;e++){
-        if(edge_val[e] == 1){
-            if(edges[e].is_h) H[edges[e].i][edges[e].j] = 1;
-            else V[edges[e].i][edges[e].j] = 1;
-        }
-    }
-}
-
-// split assignment into loops (each loop is vector of (tag,i,j))
-vector<vector< tuple<char,int,int> > > split_loops_from_assignment(){
-    vector<vector<int> > H(N+1, vector<int>(N,0));
-    vector<vector<int> > V(N, vector<int>(N+1,0));
-    for(int e=0;e<Ecnt;e++){
-        if(edge_val[e] == 1){
-            if(edges[e].is_h) H[edges[e].i][edges[e].j] = 1;
-            else V[edges[e].i][edges[e].j] = 1;
-        }
-    }
-
-    auto incident_edges_at_point = [&](int pi, int pj){
-        vector< tuple<char,int,int> > res;
-        if(pi>0 && V[pi-1][pj]) res.push_back(make_tuple('v', pi-1, pj));
-        if(pi < N && V[pi][pj]) res.push_back(make_tuple('v', pi, pj));
-        if(pj>0 && H[pi][pj-1]) res.push_back(make_tuple('h', pi, pj-1));
-        if(pj < N && H[pi][pj]) res.push_back(make_tuple('h', pi, pj));
-        return res;
-    };
-
-    auto remove_edge_mat = [&](char tag, int i, int j){
-        if(tag=='h') H[i][j] = 0;
-        else V[i][j] = 0;
-    };
-
-    vector<vector< tuple<char,int,int> > > loop_list;
-
-    while(true){
-        bool found_edge = false;
-        char start_tag = 0;
-        int start_i=-1, start_j=-1;
-        for(int i=0;i<=N && !found_edge;i++){
-            for(int j=0;j<N && !found_edge;j++){
-                if(H[i][j]){ start_tag='h'; start_i=i; start_j=j; found_edge=true; break; }
-            }
-        }
-        for(int i=0;i<N && !found_edge;i++){
-            for(int j=0;j<=N && !found_edge;j++){
-                if(V[i][j]){ start_tag='v'; start_i=i; start_j=j; found_edge=true; break; }
-            }
-        }
-        if(!found_edge) break;
-
-        int cur_pi = start_i, cur_pj = start_j;
-        vector< tuple<char,int,int> > loop;
-        char prev_tag = 0; int prev_i = -1, prev_j = -1;
-        int init_pi = cur_pi, init_pj = cur_pj;
-        while(true){
-            vector< tuple<char,int,int> > inc = incident_edges_at_point(cur_pi, cur_pj);
-            bool moved = false;
-            for(size_t k=0;k<inc.size();++k){
-                char t = get<0>(inc[k]);
-                int ei = get<1>(inc[k]);
-                int ej = get<2>(inc[k]);
-                if(prev_tag != 0 && t==prev_tag && ei==prev_i && ej==prev_j) continue;
-                loop.push_back(inc[k]);
-                remove_edge_mat(t, ei, ej);
-                // move to other endpoint
-                if(t=='h'){
-                    if(cur_pi==ei && cur_pj==ej){
-                        prev_tag = 'h'; prev_i = ei; prev_j = ej;
-                        cur_pi = ei; cur_pj = ej+1;
-                    } else {
-                        prev_tag = 'h'; prev_i = ei; prev_j = ej;
-                        cur_pi = ei; cur_pj = ej;
-                    }
-                } else {
-                    if(cur_pi==ei && cur_pj==ej){
-                        prev_tag = 'v'; prev_i = ei; prev_j = ej;
-                        cur_pi = ei+1; cur_pj = ej;
-                    } else {
-                        prev_tag = 'v'; prev_i = ei; prev_j = ej;
-                        cur_pi = ei; cur_pj = ej;
-                    }
-                }
-                moved = true;
-                break;
-            }
-            if(!moved) break;
-            if(cur_pi==init_pi && cur_pj==init_pj && !loop.empty()) break;
-        }
-        if(!loop.empty()) loop_list.push_back(loop);
-        else break;
-    }
-    return loop_list;
-}
-
-// generate hv/vv from one loop and check against grid
-bool generateSol_from_loop(const vector< tuple<char,int,int> > &loop, vector<vector<int>> &Hout, vector<vector<int>> &Vout){
-    Hout.assign(N+1, vector<int>(N,0));
-    Vout.assign(N, vector<int>(N+1,0));
-    vector<vector<int>> cnt(N, vector<int>(N,0));
-    for(size_t k=0;k<loop.size();++k){
-        char tag = get<0>(loop[k]);
-        int i = get<1>(loop[k]);
-        int j = get<2>(loop[k]);
-        if(tag=='h'){
-            Hout[i][j] = 1;
-            if(i < N) cnt[i][j] += 1;
-            if(i > 0) cnt[i-1][j] += 1;
-        } else {
-            Vout[i][j] = 1;
-            if(j < N) cnt[i][j] += 1;
-            if(j > 0) cnt[i][j-1] += 1;
-        }
-    }
-    for(int i=0;i<N;i++){
-        for(int j=0;j<N;j++){
-            if(grid[i][j] != ' '){
-                int need = grid[i][j] - '0';
-                if(cnt[i][j] != need) return false;
-            }
-        }
-    }
-    return true;
-}
-
-// serialize a solution (H,V) to string for deduplication
-string serialize_solution(const vector<vector<int>> &H, const vector<vector<int>> &V){
-    string s;
-    s.reserve((N+1)*N + N*(N+1) + 10);
-    for(int i=0;i<=N;i++){
-        for(int j=0;j<N;j++) s.push_back(H[i][j] ? '1' : '0');
-        s.push_back('|');
-    }
-    s.push_back('#');
-    for(int i=0;i<N;i++){
-        for(int j=0;j<=N;j++) s.push_back(V[i][j] ? '1' : '0');
-        s.push_back('|');
-    }
-    return s;
-}
-
-void print_solution_to_stderr(const vector<vector<int>> &H, const vector<vector<int>> &V){
-    eprint("Sol:");
-    for(int i=0;i<=N;i++){
-        string s = " ";
-        for(int k=0;k<N;k++){
-            s.push_back(H[i][k] ? '-' : ' ');
-            if(k+1<N) s.push_back(' ');
-        }
-        eprint(s);
-        if(i!=N){
-            string s2;
-            for(int p=0;p<=N;p++){
-                s2.push_back(V[i][p] ? '|' : ' ');
-                if(p!=N) s2.push_back(grid[i][p]);
-            }
-            eprint(s2);
-        }
-    }
-}
-
-// container for unique solutions
-vector<pair<vector<vector<int>>, vector<vector<int>>>> sol_list;
-unordered_set<string> sol_set; // serialized strings for dedup
-
-// recursive search (stop when found >= limit_solutions)
-bool try_search(int limit_solutions){
-    int unassigned = 0;
-    for(int e=0;e<Ecnt;e++) if(edge_val[e] == -1) unassigned++;
-    if(unassigned == 0){
-        // full assignment: split into loops and check each loop individually
-        vector<vector< tuple<char,int,int> > > loops = split_loops_from_assignment();
-        for(size_t i=0;i<loops.size();++i){
-            vector<vector<int>> Hsol, Vsol;
-            if(generateSol_from_loop(loops[i], Hsol, Vsol)){
-                string key = serialize_solution(Hsol, Vsol);
-                if(sol_set.find(key) == sol_set.end()){
-                    sol_set.insert(key);
-                    sol_list.push_back(make_pair(Hsol, Vsol));
-                    if((int)sol_list.size() >= limit_solutions) return true;
-                }
-            }
-        }
-        return false;
-    }
-    int e = pick_next_edge();
-    if(e == -1) return false;
-    for(int val = 0; val <= 1; ++val){
-        int save_sz = (int)changes.size();
-        apply_assign(e, val);
-        bool ok = contradiction_check_and_propagate();
-        if(ok){
-            if(try_search(limit_solutions)) return true;
-        }
-        rollback_to(save_sz);
-    }
-    return false;
-}
+} // namespace slither
 
 int main(int argc, char **argv){
     registerTestlibCmd(argc, argv);
 
-    // read type from input file (inf)
     int w = inf.readInt();
     if(w == 0) valid_char = " 0123";
     else valid_char = " 123";
 
-    // read contestant output (ouf) as grid grid
     grid = readSol(ouf);
 
-    // build edge list
-    edges.clear();
-    // horizontals H[0..12][0..11]
-    for(int i=0;i<=N;i++){
-        for(int j=0;j<N;j++){
-            Edge ed;
-            ed.is_h = true; ed.i = i; ed.j = j; ed.score = 0;
-            if(i>0) ed.adj_cells.push_back(make_pair(i-1,j));
-            if(i<N) ed.adj_cells.push_back(make_pair(i,j));
-            ed.adj_points.push_back(make_pair(i,j));
-            ed.adj_points.push_back(make_pair(i,j+1));
-            for(size_t k=0;k<ed.adj_cells.size();++k){
-                int r = ed.adj_cells[k].first, c = ed.adj_cells[k].second;
-                if(grid[r][c] != ' ') ed.score++;
-            }
-            edges.push_back(ed);
-        }
+    // Stage 1: brute-force DFS with a fixed node budget.  Every loop it finds is genuine, so reaching 6 is an
+    // exact answer; finishing the search without abort is exact too.
+    // Stage 2: plug DP (exact, saturated count) whenever the DFS ran out of budget.
+    int cnt;
+    const long long DFS_BUDGET = 3000000LL; // nodes, not time: the verdict does not depend on machine speed
+    bool aborted = false;
+    long long f = dfs12::count_capped(grid, 6, DFS_BUDGET, aborted);
+    if(!aborted) cnt = (int)f;
+    else {
+        slither::u64 total = slither::count_loops(grid, N, N);
+        cnt = (int)std::min<slither::u64>(total, 6);
     }
-    // verticals V[0..11][0..12]
-    for(int i=0;i<N;i++){
-        for(int j=0;j<=N;j++){
-            Edge ed;
-            ed.is_h = false; ed.i = i; ed.j = j; ed.score = 0;
-            if(j>0) ed.adj_cells.push_back(make_pair(i,j-1));
-            if(j<N) ed.adj_cells.push_back(make_pair(i,j));
-            ed.adj_points.push_back(make_pair(i,j));
-            ed.adj_points.push_back(make_pair(i+1,j));
-            for(size_t k=0;k<ed.adj_cells.size();++k){
-                int r = ed.adj_cells[k].first, c = ed.adj_cells[k].second;
-                if(grid[r][c] != ' ') ed.score++;
-            }
-            edges.push_back(ed);
-        }
-    }
-    Ecnt = (int)edges.size();
-
-    // initialize state
-    edge_val.assign(Ecnt, -1);
-    for(int i=0;i<N;i++) for(int j=0;j<N;j++){
-        cell_assigned_true[i][j] = 0;
-        cell_unassigned[i][j] = 4;
-    }
-    for(int i=0;i<=N;i++) for(int j=0;j<=N;j++){
-        point_deg[i][j] = 0;
-        int t = 0;
-        if(i!=0) t++;
-        if(i!=N) t++;
-        if(j!=0) t++;
-        if(j!=N) t++;
-        point_unassigned[i][j] = t;
-    }
-
-    // run initial propagation
-    if(!contradiction_check_and_propagate()){
-        // no valid assignment at all
-        quitp(0.0, "There is no valid solution");
-    }
-
-    // Enumerate solutions, stopping once the score bucket is known.
-    sol_list.clear();
-    sol_set.clear();
-    const int LIMIT = 6;
-    try_search(LIMIT);
-
-    int cnt = (int)sol_list.size();
 
     if(cnt == 0){
         quitp(0.0, "There is no valid solution");
-    }
-
-    for(int k=0;k< (int)min((size_t)6, sol_list.size()); ++k) {
-        print_solution_to_stderr(sol_list[k].first, sol_list[k].second);
     }
 
     const int ones = count_ones();
