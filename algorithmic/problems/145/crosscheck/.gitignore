@@ -1,0 +1,14 @@
+# build products and scratch files
+chk_old
+chk_new
+dpcount
+hybridcount
+naive
+count
+count_ns
+*.txt.t
+rs_*.txt
+r12_*.txt
+rl_*.txt
+rh_*.txt
+tmp.out
